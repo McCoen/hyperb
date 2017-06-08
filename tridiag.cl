@@ -1,8 +1,8 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
 #define NUMBER_OF_DAMPERS 1
-#define N 80
-#define K 32
+#define N 160
+#define K 64
 
 typedef struct alphastruct {
 	double a, b, c, d;
@@ -47,42 +47,39 @@ cl_matrix2x2 matrixMultiplyByNumber2x2(cl_matrix2x2 a, double d) {
 	return b;
 }
 
-cl_matrix2x2 sweepAlpha(cl_matrix2x2 sweepAlphaArr, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 sweepSide) {
-	cl_matrix2x2 alpha;
-	cl_matrix2x2 temp = c;
-	cl_matrix2x2 temp2 = matrixMultiply2x2(sweepSide, sweepAlphaArr);
-	temp.a -= temp2.a;
-	temp.b -= temp2.b;
-	temp.c -= temp2.c;
-	temp.d -= temp2.d;
+double justSolveEnergyInt(__global double* wt, __global double* damperX, __global double* pu, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 cTilde, cl_matrix2x2 sweepSide, double a, double t, double l, double hx, double ht, double alpha, double beta, __global cl_matrix2x2* tempAlphaArr) {
 
-	cl_matrix2x2 invTemp = matrixInverse(temp);
 
-	alpha = matrixMultiply2x2(invTemp, sweepSide);
-	return alpha;
-}
+	cl_matrix2x2 sweepAlphaArr[N - 2];
+	cl_matrix2x2 temp, invTemp;
 
-cl_matrix2x1 sweepBeta(cl_matrix2x2 sweepAlphaArr, cl_matrix2x1 sweepBetaArr, cl_matrix2x1 right, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 sweepSide) {
-	cl_matrix2x1 beta;
+	cl_matrix2x1 sweepBetaArr[N - 1];
+	cl_matrix2x1 y0, y1, y2;
+	cl_matrix2x1 temp1, temp2, temp3;
+	cl_matrix2x1 currentV;
 
-	cl_matrix2x2 temp = c;
-	cl_matrix2x2 temp2 = matrixMultiply2x2(sweepSide, sweepAlphaArr);
-	temp.a -= temp2.a;
-	temp.b -= temp2.b;
-	temp.c -= temp2.c;
-	temp.d -= temp2.d;
+	double detDenominator, fA, fB, x, wA, wB, fNew, numInt, dx;
 
-	cl_matrix2x2 invTemp = matrixInverse(temp);
-	cl_matrix2x1 temp3 = matrixMultiply(sweepSide, sweepBetaArr);
-	temp3.a += right.a;
-	temp3.b += right.b;
+	sweepAlphaArr[0].a = cInverted.a;
+	sweepAlphaArr[0].b = cInverted.b;
+	sweepAlphaArr[0].c = cInverted.c;
+	sweepAlphaArr[0].d = cInverted.d;
+	for (int i = 1; i < N - 2; i++) {
+		temp.a = c.a - sweepAlphaArr[i - 1].a;
+		temp.b = c.b - sweepAlphaArr[i - 1].b;
+		temp.c = c.c - sweepAlphaArr[i - 1].c;
+		temp.d = c.d - sweepAlphaArr[i - 1].d;
 
-	beta = matrixMultiply(invTemp, temp3);
-	return beta;
-}
-
-double justSolveEnergyInt(__global double* wt, __global double* damperX, __global double* pu, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 cTilde, cl_matrix2x2 sweepSide, double a, double t, double l, double hx, double ht, double alpha, double beta) {
-
+		detDenominator = temp.a * temp.d - temp.b * temp.c;
+		sweepAlphaArr[i].a = temp.d / detDenominator;
+		sweepAlphaArr[i].b = -temp.b / detDenominator;
+		sweepAlphaArr[i].c = -temp.c / detDenominator;
+		sweepAlphaArr[i].d = temp.a / detDenominator;
+	}
+	for (int i = 1; i < N - 1; i++) {
+		sweepBetaArr[i].a = 2.0;
+		sweepBetaArr[i].b = 2.0;
+	}
 	double u[N + 1];
 	double v[N + 1];
 	double f[N + 1];
@@ -94,51 +91,42 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 	}
 
 	for (int i = 1; i <= K; i++) {
-		cl_matrix2x2 sweepAlphaArr[N - 2];
-		for (int j = 0; j < N - 2; j++) {
-			if (j == 0) {
-				sweepAlphaArr[0] = matrixMultiply2x2(cInverted, sweepSide);
-			} else {
-				sweepAlphaArr[j] = sweepAlpha(sweepAlphaArr[j - 1], c, cInverted, sweepSide);
-			}
-		}
-
-		cl_matrix2x1 sweepBetaArr[N - 1];
 		for (int j = 1; j < N; j++) {
-			cl_matrix2x1 y0, y1, y2;
 			y0.a = u[j - 1];
 			y0.b = v[j - 1];
+
 			y1.a = u[j];
 			y1.b = v[j];
+
 			y2.a = u[j + 1];
 			y2.b = v[j + 1];
 
-			cl_matrix2x1 temp1 = matrixMultiply(cTilde, y1);
+			temp1.a = cTilde.a * y1.a + cTilde.b * y1.b;
+			temp1.b = cTilde.c * y1.a + cTilde.d * y1.b;
 
-			cl_matrix2x1 temp = y0;
-			temp.a -= temp1.a;
-			temp.b -= temp1.b;
+			temp2.a = y0.a;
+			temp2.b = y0.b;
 
-			temp.a += y2.a;
-			temp.b += y2.b;
+			temp2.a -= temp1.a;
+			temp2.b -= temp1.b;
 
-			cl_matrix2x1 currentV;
+			temp2.a += y2.a;
+			temp2.b += y2.b;
 
-			double fA = 0.0, fB = 0.0;
-			double x = hx * j;
+			fA = 0.0;
+			fB = 0.0;
+			x = hx * j;
 
-			for (int m = 0; m < NUMBER_OF_DAMPERS; m++) {
-				double wA = wt[(i - 1) + m * (K + 1)];
-				double wB = wt[i + m * (K + 1)];
-				double fNew = -x / (a * l) * (l - damperX[m]);
+			wA = wt[i - 1];
+			wB = wt[i];
 
-				if (x >= damperX[m]) {
-					fNew += 1.0 / a * (x - damperX[m]);
-				}
-
-				fA += fNew * wA;
-				fB += fNew * wB;
+			fNew = -x * (1.0 - 0.5);
+			if (x >= 0.5) {
+				fNew += 1.0 * (x - 0.5);
 			}
+
+			fA += fNew * wA;
+			fB += fNew * wB;
 
 			currentV.a = -fA - fB;
 			currentV.b = 0.0;
@@ -146,34 +134,41 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 			currentV.a *= beta;
 			currentV.b *= beta;
 
-			temp.a += currentV.a;
-			temp.b += currentV.b;
-
-			cl_matrix2x1 currentRight = temp;
+			temp2.a += currentV.a;
+			temp2.b += currentV.b;
 
 			if (j == 1) {
-				sweepBetaArr[0] = matrixMultiply(cInverted, currentRight);
+				sweepBetaArr[0].a = cInverted.a * temp2.a + cInverted.b * temp2.b;
+				sweepBetaArr[0].b = cInverted.c * temp2.a + cInverted.d * temp2.b;
 			} else {
-				sweepBetaArr[j - 1] = sweepBeta(sweepAlphaArr[j - 2], sweepBetaArr[j - 2], currentRight, c, cInverted, sweepSide);
+
+				temp.a = c.a - sweepAlphaArr[j - 2].a;
+				temp.b = c.b - sweepAlphaArr[j - 2].b;
+				temp.c = c.c - sweepAlphaArr[j - 2].c;
+				temp.d = c.d - sweepAlphaArr[j - 2].d;
+
+				detDenominator = temp.a * temp.d - temp.b * temp.c;
+				invTemp.a = temp.d / detDenominator;
+				invTemp.b = -temp.b / detDenominator;
+				invTemp.c = -temp.c / detDenominator;
+				invTemp.d = temp.a / detDenominator;
+
+				temp3.a = sweepBetaArr[j - 2].a;
+				temp3.b = sweepBetaArr[j - 2].b;
+				temp3.a += temp2.a;
+				temp3.b += temp2.b;
+
+				sweepBetaArr[j - 1].a = invTemp.a * temp3.a + invTemp.b * temp3.b;
+				sweepBetaArr[j - 1].b = invTemp.c * temp3.a + invTemp.d * temp3.b;
 			}
 		}
 
-		cl_matrix2x1 x[N - 1];
-		x[N - 2] = sweepBetaArr[N - 2];
+		u[N - 1] = sweepBetaArr[N - 2].a;
+		v[N - 1] = sweepBetaArr[N - 2].b;
 
-		for (int j = N - 3; j >= 0; j--) {
-			cl_matrix2x1 temp = matrixMultiply(sweepAlphaArr[j], x[j + 1]);
-			temp.a += sweepBetaArr[j].a;
-			temp.b += sweepBetaArr[j].b;
-			x[j] = temp;
-		}
-
-		for (int j = 1; j < N; j++) {
-			cl_matrix2x1 current = x[j - 1];
-
-			u[j] = current.a;
-			v[j] = current.b;
-
+		for (int j = N - 2; j > 0; j--) {
+			u[j] = sweepAlphaArr[j - 1].a * u[j + 1] + sweepAlphaArr[j - 1].b * v[j + 1] + sweepBetaArr[j - 1].a;
+			v[j] = sweepAlphaArr[j - 1].c * u[j + 1] + sweepAlphaArr[j - 1].d * v[j + 1] + sweepBetaArr[j - 1].b;
 		}
 
 		if (i == K - 2) {
@@ -193,7 +188,7 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 				f[j] = f[j] / ht;
 				f[j] = f[j] * f[j];
 
-				double dx = 0.0;
+				dx = 0.0;
 				if (j == 0) {
 					dx = (-3.0 * u[j] + 4.0 * u[j + 1] - u[j + 2]) / (2.0 * hx);
 				} else if (j == N) {
@@ -207,126 +202,20 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 		}
 	}
 
-	double numInt = f[0];
-
+	numInt = f[0];
 	for (int i = 1; i < N; i += 2) {
-		numInt += 4 * f[i];
+		numInt += 4.0 * f[i];
 	}
 	for (int i = 2; i < N; i += 2) {
-		numInt += 2 * f[i];
+		numInt += 2.0 * f[i];
 	}
 	numInt += f[N];
-
 	numInt *= hx / 3.0;
 
 	return numInt;
 }
 
-double justSolve(__global double* wt, __global double* damperX, __global double* pu, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 cTilde, cl_matrix2x2 sweepSide, double a, double t, double l, double hx, double ht, double alpha, double beta) {
-
-	double u[N + 1];
-	double v[N + 1];
-	for (int i = 0; i < N + 1; i++) {
-		u[i] = pu[i];
-		v[i] = 0.0;
-	}
-
-	int gi = 1, gj = 0;
-	for (int i = 1; i <= K; i++) {
-		cl_matrix2x2 sweepAlphaArr[N - 2];
-		for (int j = 0; j < N - 2; j++) {
-			if (j == 0) {
-				sweepAlphaArr[0] = matrixMultiply2x2(cInverted, sweepSide);
-			} else {
-				sweepAlphaArr[j] = sweepAlpha(sweepAlphaArr[j - 1], c, cInverted, sweepSide);
-			}
-		}
-
-		cl_matrix2x1 sweepBetaArr[N - 1];
-		for (int j = 1; j < N; j++) {
-			cl_matrix2x1 y0, y1, y2;
-			y0.a = u[j - 1];
-			y0.b = v[j - 1];
-			y1.a = u[j];
-			y1.b = v[j];
-			y2.a = u[j + 1];
-			y2.b = v[j + 1];
-
-			cl_matrix2x1 temp1 = matrixMultiply(cTilde, y1);
-
-			cl_matrix2x1 temp = y0;
-			temp.a -= temp1.a;
-			temp.b -= temp1.b;
-
-			temp.a += y2.a;
-			temp.b += y2.b;
-
-			cl_matrix2x1 currentV;
-
-			double fA = 0.0, fB = 0.0;
-			double x = hx * j;
-
-			for (int m = 0; m < NUMBER_OF_DAMPERS; m++) {
-				double wA = wt[(i - 1) + m * (K + 1)];
-				double wB = wt[i + m * (K + 1)];
-				double fNew = -x / (a * l) * (l - damperX[m]);
-
-				if (x >= damperX[m]) {
-					fNew += 1.0 / a * (x - damperX[m]);
-				}
-
-				fA += fNew * wA;
-				fB += fNew * wB;
-			}
-
-			currentV.a = -fA - fB;
-			currentV.b = 0.0;
-
-			currentV.a *= beta;
-			currentV.b *= beta;
-
-			temp.a += currentV.a;
-			temp.b += currentV.b;
-
-			cl_matrix2x1 currentRight = temp;
-
-			if (j == 1) {
-				sweepBetaArr[0] = matrixMultiply(cInverted, currentRight);
-			} else {
-				sweepBetaArr[j - 1] = sweepBeta(sweepAlphaArr[j - 2], sweepBetaArr[j - 2], currentRight, c, cInverted, sweepSide);
-			}
-		}
-
-		cl_matrix2x1 x[N - 1];
-		x[N - 2] = sweepBetaArr[N - 2];
-
-		for (int j = N - 3; j >= 0; j--) {
-			cl_matrix2x1 temp = matrixMultiply(sweepAlphaArr[j], x[j + 1]);
-			temp.a += sweepBetaArr[j].a;
-			temp.b += sweepBetaArr[j].b;
-			x[j] = temp;
-		}
-
-		for (int j = 1; j < N; j++) {
-			cl_matrix2x1 current = x[j - 1];
-
-			u[j] = current.a;
-			v[j] = current.b;
-
-		}
-
-		gj = 0;
-		for (int j = 0; j <= N; j++) {
-			pu[gj + gi * (N + 1)] = u[gj];
-			gj++;
-		}
-		gi++;
-	}
-
-	return 0.0;
-}
-
-__kernel void gradientAt(__global double* grad, __global double* energyInt, __global double* wt, __global double* damperX, __global double* u, __global double* v, __global cl_matrix2x1* sweepRightArr, __global cl_matrix2x2* sweepAlphaArr, __global cl_matrix2x1* sweepBetaArr, double a, double l, double t, __global int* noFault) {
+__kernel void energyInt(__global double* energyInt, __global double* wt, __global double* damperX, __global double* u, double a, double l, double t, __global int* noFault, __global cl_matrix2x2* tempAlpha) {
 
 	//TODO change here
 	a = 1.0;
@@ -370,110 +259,8 @@ __kernel void gradientAt(__global double* grad, __global double* energyInt, __gl
 	sweepSide.c = 0.0;
 	sweepSide.d = 1.0;
 
-	double sei = justSolveEnergyInt(wt, damperX, u, c, cInverted, cTilde, sweepSide, a, t, l, hx, ht, alpha, beta);
-
-	energyInt[0] = sei;
-
-	noFault[0] = 1;
-}
-
-__kernel void energyInt(__global double* energyInt, __global double* wt, __global double* damperX, __global double* u, __global double* v, __global cl_matrix2x1* sweepRightArr, __global cl_matrix2x2* sweepAlphaArr, __global cl_matrix2x1* sweepBetaArr, double a, double l, double t, __global int* noFault) {
-
-	//TODO change here
-	a = 1.0;
-	l = 1.0;
-
-	double hx = l / N;
-	double ht = t / K;
-
-	double alpha = 2.0 * pow(hx, 2) / (a * ht);
-	double beta = pow(hx, 2) / a;
-
-	cl_matrix2x2 e2;
-	e2.a = 2.0;
-	e2.b = 0.0;
-	e2.c = 0.0;
-	e2.d = 2.0;
-
-	cl_matrix2x2 bAlpha;
-	bAlpha.a = 0.0;
-	bAlpha.b = -alpha;
-	bAlpha.c = alpha;
-	bAlpha.d = 0.0;
-
-	cl_matrix2x2 c;
-	c.a = e2.a + bAlpha.a;
-	c.b = e2.b + bAlpha.b;
-	c.c = e2.c + bAlpha.c;
-	c.d = e2.d + bAlpha.d;
-
-	cl_matrix2x2 cInverted = matrixInverse(c);
-
-	cl_matrix2x2 cTilde;
-	cTilde.a = e2.a - bAlpha.a;
-	cTilde.b = e2.b - bAlpha.b;
-	cTilde.c = e2.c - bAlpha.c;
-	cTilde.d = e2.d - bAlpha.d;
-
-	cl_matrix2x2 sweepSide;
-	sweepSide.a = 1.0;
-	sweepSide.b = 0.0;
-	sweepSide.c = 0.0;
-	sweepSide.d = 1.0;
-
-	double sei = justSolveEnergyInt(wt, damperX, u, c, cInverted, cTilde, sweepSide, a, t, l, hx, ht, alpha, beta);
+	double sei = justSolveEnergyInt(wt, damperX, u, c, cInverted, cTilde, sweepSide, a, t, l, hx, ht, alpha, beta, tempAlpha);
 	
-	energyInt[0] = sei;
-
-	noFault[0] = 1;
-}
-
-__kernel void solveGrid(__global double* energyInt, __global double* wt, __global double* damperX, __global double* u, __global double* v, __global cl_matrix2x1* sweepRightArr, __global cl_matrix2x2* sweepAlphaArr, __global cl_matrix2x1* sweepBetaArr, double a, double l, double t, __global int* noFault) {
-
-	//TODO change here
-	a = 1.0;
-	l = 1.0;
-
-	double hx = l / N;
-	double ht = t / K;
-
-	double alpha = 2.0 * pow(hx, 2) / (a * ht);
-	double beta = pow(hx, 2) / a;
-
-	cl_matrix2x2 e2;
-	e2.a = 2.0;
-	e2.b = 0.0;
-	e2.c = 0.0;
-	e2.d = 2.0;
-
-	cl_matrix2x2 bAlpha;
-	bAlpha.a = 0.0;
-	bAlpha.b = -alpha;
-	bAlpha.c = alpha;
-	bAlpha.d = 0.0;
-
-	cl_matrix2x2 c;
-	c.a = e2.a + bAlpha.a;
-	c.b = e2.b + bAlpha.b;
-	c.c = e2.c + bAlpha.c;
-	c.d = e2.d + bAlpha.d;
-
-	cl_matrix2x2 cInverted = matrixInverse(c);
-
-	cl_matrix2x2 cTilde;
-	cTilde.a = e2.a - bAlpha.a;
-	cTilde.b = e2.b - bAlpha.b;
-	cTilde.c = e2.c - bAlpha.c;
-	cTilde.d = e2.d - bAlpha.d;
-
-	cl_matrix2x2 sweepSide;
-	sweepSide.a = 1.0;
-	sweepSide.b = 0.0;
-	sweepSide.c = 0.0;
-	sweepSide.d = 1.0;
-
-	double sei = justSolve(wt, damperX, u, c, cInverted, cTilde, sweepSide, a, t, l, hx, ht, alpha, beta);
-
 	energyInt[0] = sei;
 
 	noFault[0] = 1;
