@@ -25,8 +25,8 @@ global wt_bounds = [nan, nan; nan, nan];
 global enable_interpolation = false;
 global full_diff = true;
 
-global n = 80;
-global k = 32;
+global n = 160;
+global k = 64;
 global wt_start = zeros(k + 1, num_of_dampers);
 
 t = 1.0;
@@ -73,7 +73,7 @@ disp(wt);
 %wt = marquardt(@solve_all, damper_x, wt, 1, vareps, power(10, 4), n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta, false);
 grad = zeros(1, 1);
 wt = gpuMarquardt(damper_x, wt, n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta, grad);
-disp(wt);
+%disp(wt);
 exit;
 u = oscDeadening(damper_x, wt, n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta);
 print_u_grid_values(ht, u);
