@@ -1,3 +1,4 @@
+#define CL_USE_DEPRECATED_OPENCL_1_2_APIS
 #define USE_GPU
 #define v403
 
@@ -27,12 +28,39 @@ cl_uint ret_num_devices;
 cl_uint ret_num_platforms;
 cl_int ret;
 
-cl_mem cl_temp_alpha;
-cl_mem cl_energy_int;
-cl_mem cl_damper_x;
-cl_mem cl_wt;
-cl_mem cl_u;
-cl_mem cl_no_fault;
+cl_context gradientContext = NULL;
+cl_program gradientProgram = NULL;
+cl_kernel gradientKernel = NULL;
+
+void createAndBuildGradientKernel() {
+	FILE* fp;
+	const char* filename = "gradient.cl";
+	size_t source_size;
+	char* source_str;
+
+	fp = fopen(filename, "r");
+	if (!fp) {
+		fprintf(stderr, "Fail\n");
+		exit(0);
+	}
+
+	source_str = (char*) malloc(sizeof(char) * 100000);
+	source_size = fread(source_str, 1, 100000, fp);
+	fclose(fp);
+
+	ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
+	ret = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, &ret_num_devices);
+
+	gradientContext = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
+	gradientProgram = clCreateProgramWithSource(gradientContext, 1, (const char**) &source_str, (const size_t*) &source_size, &ret);
+
+	puts("Now building gradient kernel");
+
+	ret = clBuildProgram(gradientProgram, 1, &device_id, NULL, NULL, NULL);
+	gradientKernel = clCreateKernel(gradientProgram, "gradientAt", &ret);
+
+	puts("OpenCL kernel has built");
+}
 
 void createAndBuildKernel() {
 	FILE* fp;
@@ -85,36 +113,12 @@ void printGrid(double* u, int n, int k) {
 }
 
 void releaseAll() {
-	clReleaseMemObject(cl_energy_int);
-	clReleaseMemObject(cl_damper_x);
-	clReleaseMemObject(cl_wt);
-	clReleaseMemObject(cl_u);
-	clReleaseMemObject(cl_no_fault);
-
 	clReleaseProgram(program);
 	clReleaseKernel(kernel);
 	clReleaseContext(context);
 }
 
-void initializeBuffers(int numOfDampers, int n, int k, double a, double l, double t) {
-	cl_energy_int = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double), NULL, NULL);
-	cl_damper_x = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
-	cl_wt = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * (k + 1), NULL, NULL);
-	cl_u = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
-	cl_no_fault = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
-	cl_temp_alpha = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_matrix2x2) * 200, NULL, NULL);
-	clSetKernelArg(kernel, 0, sizeof(cl_mem), &cl_energy_int);
-	clSetKernelArg(kernel, 1, sizeof(cl_mem), &cl_wt);
-	clSetKernelArg(kernel, 2, sizeof(cl_mem), &cl_damper_x);
-	clSetKernelArg(kernel, 3, sizeof(cl_mem), &cl_u);
-	clSetKernelArg(kernel, 4, sizeof(cl_double), &a);
-	clSetKernelArg(kernel, 5, sizeof(cl_double), &l);
-	clSetKernelArg(kernel, 6, sizeof(cl_double), &t);
-	clSetKernelArg(kernel, 7, sizeof(cl_mem), &cl_no_fault);
-	clSetKernelArg(kernel, 8, sizeof(cl_mem), &cl_temp_alpha);
-}
-
-double solveAll(cl_double* damperX, cl_double* wt, cl_double* u, int n, int k) {
+cl_double solveEnergyInt(cl_double* damperX, cl_double* wt, cl_double* u, int n, int k) {
 	size_t block = 1;
 	size_t global_work_size[] = {block, 0, 0};
 	size_t local_work_size[] = {block, 0, 0};
@@ -126,26 +130,36 @@ double solveAll(cl_double* damperX, cl_double* wt, cl_double* u, int n, int k) {
 	cl_double l = 1.0;
 	cl_double t = 1.0;
 
-	int numOfDampers = 2;
+	int numOfDampers = 1;
 
+	cl_mem cl_energy_int = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double), NULL, NULL);
+	cl_mem cl_damper_x = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
+	cl_mem cl_wt = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * (k + 1), NULL, NULL);
+	cl_mem cl_u = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
+	cl_mem cl_no_fault = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
+
+	clSetKernelArg(kernel, 0, sizeof(cl_mem), &cl_energy_int);
+	clSetKernelArg(kernel, 1, sizeof(cl_mem), &cl_wt);
+	clSetKernelArg(kernel, 2, sizeof(cl_mem), &cl_damper_x);
+	clSetKernelArg(kernel, 3, sizeof(cl_mem), &cl_u);
+	clSetKernelArg(kernel, 4, sizeof(cl_double), &a);
+	clSetKernelArg(kernel, 5, sizeof(cl_double), &l);
+	clSetKernelArg(kernel, 6, sizeof(cl_double), &t);
+	clSetKernelArg(kernel, 7, sizeof(cl_mem), &cl_no_fault);
 
 	cl_double* sei = (cl_double*) malloc(sizeof(cl_double));
 	sei[0] = -1.0;
-
-	cl_matrix2x2* tempAlpha = (cl_matrix2x2*) malloc(sizeof(cl_matrix2x2) * 200);
 
 	do {
 		command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
 
 		clEnqueueWriteBuffer(command_queue, cl_energy_int, CL_TRUE, 0, sizeof(cl_double), sei, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_wt, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), wt, 0, NULL, NULL);
-		clEnqueueWriteBuffer(command_queue, cl_damper_x, CL_TRUE, 0, sizeof(cl_double) * 2, damperX, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_damper_x, CL_TRUE, 0, sizeof(cl_double) * numOfDampers, damperX, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_u, CL_TRUE, 0, sizeof(cl_double) * (n + 1), u, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_no_fault, CL_TRUE, 0, sizeof(cl_int), no_fault, 0, NULL, NULL);
-		clEnqueueWriteBuffer(command_queue, cl_temp_alpha, CL_TRUE, 0, sizeof(cl_matrix2x2) * 200, tempAlpha, 0, NULL, NULL);
 
 		clEnqueueNDRangeKernel(command_queue, kernel, CL_TRUE, NULL, global_work_size, local_work_size, 0, NULL, NULL);
-		//sleep(2);
 
 		clFlush(command_queue);
 		clFinish(command_queue);
@@ -156,9 +170,11 @@ double solveAll(cl_double* damperX, cl_double* wt, cl_double* u, int n, int k) {
 		clReleaseCommandQueue(command_queue);
 	} while (no_fault[0] != 1);
 
-	//printGrid(u, n, k);
-	//puts("");
-	//printf("Simpson Energy Int = %lf\n", sei[0]);
+	clReleaseMemObject(cl_energy_int);
+	clReleaseMemObject(cl_damper_x);
+	clReleaseMemObject(cl_wt);
+	clReleaseMemObject(cl_u);
+	clReleaseMemObject(cl_no_fault);
 
 	return sei[0];
 
@@ -175,7 +191,6 @@ Matrix toMatrix(double* u, const int n, const int k) {
 	return mu;
 }
 
-
 double derivativeAt(double* dampx, Matrix wt, double* du, int n, int k, int nth) {
 	double derH = pow(10, -4);
 
@@ -190,8 +205,8 @@ double derivativeAt(double* dampx, Matrix wt, double* du, int n, int k, int nth)
 		dwt1[i] = wt1(i);
 	}
 
-	double f0 = solveAll(dampx, dwt, du, n, k);
-	double f1 = solveAll(dampx, dwt1, du, n, k);
+	double f0 = solveEnergyInt(dampx, dwt, du, n, k);
+	double f1 = solveEnergyInt(dampx, dwt1, du, n, k);
 
 	return (f1 - f0) / derH;
 }
@@ -222,17 +237,71 @@ double euclideanNorm(Matrix gradient, int k) {
 	return sqrt(n);
 }
 
-Matrix gpuGradientAt(double sei, Matrix wt, int k, double derH, double* dampx, double* du, int n) {
-	double dwt[k + 1];
+Matrix gpuGradientAt(cl_double sei, Matrix wt, int k, double derH, cl_double* dampx, cl_double* u, int n) {
+	size_t block = 1;
+	size_t global_work_size[] = {block, 0, 0};
+	size_t local_work_size[] = {block, 0, 0};
+
+	cl_int* no_fault = (cl_int*) malloc(sizeof(cl_int));
+	no_fault[0] = 0;
+
+	cl_double a = 1.0;
+	cl_double l = 1.0;
+	cl_double t = 1.0;
+
+	int numOfDampers = 1;
+
+	cl_mem cl_gradient = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (k + 1), NULL, NULL);
+	cl_mem cl_wt = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * (k + 1), NULL, NULL);
+	cl_mem cl_damper_x = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
+	cl_mem cl_u = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
+	cl_mem cl_no_fault = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
+
+	clSetKernelArg(gradientKernel, 0, sizeof(cl_double), &sei);
+	clSetKernelArg(gradientKernel, 1, sizeof(cl_mem), &cl_gradient);
+	clSetKernelArg(gradientKernel, 2, sizeof(cl_mem), &cl_wt);
+	clSetKernelArg(gradientKernel, 3, sizeof(cl_mem), &cl_damper_x);
+	clSetKernelArg(gradientKernel, 4, sizeof(cl_mem), &cl_u);
+	clSetKernelArg(gradientKernel, 5, sizeof(cl_double), &a);
+	clSetKernelArg(gradientKernel, 6, sizeof(cl_double), &l);
+	clSetKernelArg(gradientKernel, 7, sizeof(cl_double), &t);
+	clSetKernelArg(gradientKernel, 8, sizeof(cl_mem), &cl_no_fault);
+
+	cl_double* grad = (cl_double*) malloc(sizeof(cl_double) * (k + 1));
+	cl_double* dwt = (cl_double*) malloc(sizeof(cl_double) * (k + 1));
+	for (register int i = 0; i < k + 1; i++) {
+		dwt[i] = wt(i);
+	}
+
+	do {
+		cl_command_queue command_queue = clCreateCommandQueue(gradientContext, device_id, 0, &ret);
+
+		//clEnqueueWriteBuffer(command_queue, cl_gradient, CL_TRUE, 0, sizeof(cl_double) * (k + 1), gradient, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_wt, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dwt, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_damper_x, CL_TRUE, 0, sizeof(cl_double) * numOfDampers, dampx, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_u, CL_TRUE, 0, sizeof(cl_double) * (n + 1), u, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_no_fault, CL_TRUE, 0, sizeof(cl_int), no_fault, 0, NULL, NULL);
+
+		clEnqueueNDRangeKernel(command_queue, gradientKernel, CL_TRUE, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+
+		clFlush(command_queue);
+		clFinish(command_queue);
+
+		clEnqueueReadBuffer(command_queue, cl_gradient, CL_TRUE, 0, sizeof(cl_double) * (k + 1), grad, 0, NULL, NULL);
+		clEnqueueReadBuffer(command_queue, cl_no_fault, CL_TRUE, 0, sizeof(cl_int), no_fault, 0, NULL, NULL);
+
+		clReleaseCommandQueue(command_queue);
+	} while (no_fault[0] != 1);
+
+	clReleaseMemObject(cl_gradient);
+	clReleaseMemObject(cl_wt);
+	clReleaseMemObject(cl_damper_x);
+	clReleaseMemObject(cl_u);
+	clReleaseMemObject(cl_no_fault);
+
 	Matrix gradient(k + 1, 1);
 	for (register int i = 0; i < k + 1; i++) {
-		Matrix wtNew = wt;
-		wtNew(i) += derH;
-		for (register int j = 0; j < k + 1; j++) {
-			dwt[j] = wtNew(j);
-		}
-		double seiNew = solveAll(dampx, dwt, du, n, k);
-		gradient(i) = (seiNew - sei) / derH;
+		gradient(i) = grad[i];
 	}
 	return gradient;
 }
@@ -242,16 +311,15 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	Matrix wt = args(1).matrix_value();
 	int n = args(2).int_value();
 	int k = args(3).int_value();
-
-	Matrix u = args(6).matrix_value();
+	Matrix u = args(4).matrix_value();
+	cl_double a = args(5).double_value();
+	cl_double l = args(6).double_value();
+	cl_double t = args(7).double_value();
 
 	createAndBuildKernel();
+	createAndBuildGradientKernel();
 	
 	double* du = toDouble(u, n, k);
-	double* dv = (double*) malloc(sizeof(double) * (n + 1) * (k + 1));
-	for (register int i = 0; i < (n + 1) * (k + 1); i++) {
-		dv[i] = 0.0;
-	}
 	double dampx[]{damperX(0), damperX(1)};
 	double dwt[k + 1];
 	for (register int i = 0; i < k + 1; i++) {
@@ -261,19 +329,18 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	printf("\nUsing Marquardt minimization\n\n");
 
 	int iter = 0, m = 1;
-	
-	cl_double a = 1.0;
-	cl_double l = 1.0;
-	cl_double t = 1.0;
-	initializeBuffers(2, n, k, a, l, t);
-	double fPrev = solveAll(dampx, dwt, du, n, k);
+
+	double fPrev = solveEnergyInt(dampx, dwt, du, n, k);
 	double fNew = fPrev;
 
 	printf("Iteration %d/%d error: %lf\n", iter, m, fPrev);
 	printf("\n");
 
 	double derH = pow(10, -4);
-	Matrix gradient = gpuGradientAt(fPrev, wt, k, derH, dampx, du, n);
+	Matrix gradient;
+	double gradientNorm;
+
+	gradient = gpuGradientAt(fPrev, wt, k, derH, dampx, du, n);
 	
 	printf("Iteration %d/%d gradient:\n", iter, m);
 	for (register int i = 0; i < k + 1; i++) {
@@ -281,7 +348,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	}
 	printf("\n");
 
-	double gradientNorm = euclideanNorm(gradient, k);
+	gradientNorm = euclideanNorm(gradient, k);
 	printf("Iteration %d/%d gradient norm: %lf\n", iter, m, gradientNorm);
 	printf("\n");
 
@@ -313,7 +380,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 			for (register int i = 0; i < k + 1; i++) {
 				dwt[i] = wtNew(i);
 			}
-			fNew = solveAll(dampx, dwt, du, n, k);
+			fNew = solveEnergyInt(dampx, dwt, du, n, k);
 
 			
 			if (fNew < fPrev) {
@@ -365,96 +432,3 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	return octave_value(wt);
 }
 
-DEFUN_DLD(oscDeadening, args, nargout, "Hello World Help String") {
-    Matrix damperX = args(0).matrix_value();
-    Matrix wt = args(1).matrix_value();
-    int n = args(2).int_value();
-    int k = args(3).int_value();
-    double hx = args(4).double_value();
-    double ht = args(5).double_value();
-
-    Matrix u = args(6).matrix_value();
-    Matrix v = args(7).matrix_value();
-    Matrix matrixC = args(8).matrix_value();
-    Matrix matrixInvertedC = args(9).matrix_value();
-    Matrix matrixSweepSide = args(10).matrix_value();
-    Matrix matrixTildeC = args(11).matrix_value();
-
-    double beta = args(12).double_value();
-
-
-    cl_matrix2x2 c;
-    c.a = matrixC(0, 0);
-    c.b = matrixC(0, 1);
-    c.c = matrixC(1, 0);
-    c.d = matrixC(1, 1);
-
-    cl_matrix2x2 cInverted;
-    cInverted.a = matrixInvertedC(0, 0);
-    cInverted.b = matrixInvertedC(0, 1);
-    cInverted.c = matrixInvertedC(1, 0);
-    cInverted.d = matrixInvertedC(1, 1);
-
-    cl_matrix2x2 sweepSide;
-    sweepSide.a = matrixSweepSide(0, 0);
-    sweepSide.b = matrixSweepSide(0, 1);
-    sweepSide.c = matrixSweepSide(1, 0);
-    sweepSide.d = matrixSweepSide(1, 1);
-
-    cl_matrix2x2 cTilde;
-    cTilde.a = matrixTildeC(0, 0);
-    cTilde.b = matrixTildeC(0, 1);
-    cTilde.c = matrixTildeC(1, 0);
-    cTilde.d = matrixTildeC(1, 1);
-#ifdef USE_GPU
-    FILE* fp;
-	const char* filename = "tridiag.cl";
-	size_t source_size;
-	char* source_str;
-
-	fp = fopen(filename, "r");
-	if (!fp) {
-		fprintf(stderr, "Fail\n");
-		exit(0);
-	}
-
-	source_str = (char*) malloc(sizeof(char) * 100000);
-	source_size = fread(source_str, 1, 100000, fp);
-	fclose(fp);
-
-	ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
-	ret = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, &ret_num_devices);
-
-	context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
-	program = clCreateProgramWithSource(context, 1, (const char**) &source_str, (const size_t*) &source_size, &ret);
-
-	ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
-	puts("building kernel");
-	kernel = clCreateKernel(program, "solveGrid", &ret);
-#endif
-	register int i;
-
-
-	double dwt[2 * (k + 1)];
-	for (i = 0; i < 2 * (k + 1); i++) {
-		dwt[i] = wt(i);
-	}
-
-	puts("ready 2 launch");
-
-	double* du = toDouble(u, n, k);
-	double* dv = (double*) malloc(sizeof(double) * (n + 1) * (k + 1));
-	for (i = 0; i < (n + 1) * (k + 1); i++) {
-		dv[i] = 0.0;
-	}
-	double dampx[]{damperX(0), damperX(1)};
-	double sei = solveAll(dampx, dwt, du, n, k);
-	clReleaseProgram(program);
-	clReleaseKernel(kernel);
-	clReleaseContext(context);
-	Matrix qqq = toMatrix(du, n, k);
-	free(du);
-	free(dv);
-	//return octave_value(energyInt(du, n, k, hx, ht));
-	return octave_value(qqq);
-}

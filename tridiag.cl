@@ -47,9 +47,7 @@ cl_matrix2x2 matrixMultiplyByNumber2x2(cl_matrix2x2 a, double d) {
 	return b;
 }
 
-double justSolveEnergyInt(__global double* wt, __global double* damperX, __global double* pu, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 cTilde, cl_matrix2x2 sweepSide, double a, double t, double l, double hx, double ht, double alpha, double beta, __global cl_matrix2x2* tempAlphaArr) {
-
-
+double solveEnergyInt(__global double* wt, __global double* damperX, __global double* pu, cl_matrix2x2 c, cl_matrix2x2 cInverted, cl_matrix2x2 cTilde, double a, double t, double l, double hx, double ht, double alpha, double beta) {
 	cl_matrix2x2 sweepAlphaArr[N - 2];
 	cl_matrix2x2 temp, invTemp;
 
@@ -76,10 +74,7 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 		sweepAlphaArr[i].c = -temp.c / detDenominator;
 		sweepAlphaArr[i].d = temp.a / detDenominator;
 	}
-	for (int i = 1; i < N - 1; i++) {
-		sweepBetaArr[i].a = 2.0;
-		sweepBetaArr[i].b = 2.0;
-	}
+
 	double u[N + 1];
 	double v[N + 1];
 	double f[N + 1];
@@ -215,11 +210,7 @@ double justSolveEnergyInt(__global double* wt, __global double* damperX, __globa
 	return numInt;
 }
 
-__kernel void energyInt(__global double* energyInt, __global double* wt, __global double* damperX, __global double* u, double a, double l, double t, __global int* noFault, __global cl_matrix2x2* tempAlpha) {
-
-	//TODO change here
-	a = 1.0;
-	l = 1.0;
+__kernel void energyInt(__global double* energyInt, __global double* wt, __global double* damperX, __global double* u, double a, double l, double t, __global int* noFault) {
 
 	double hx = l / N;
 	double ht = t / K;
@@ -253,15 +244,10 @@ __kernel void energyInt(__global double* energyInt, __global double* wt, __globa
 	cTilde.c = e2.c - bAlpha.c;
 	cTilde.d = e2.d - bAlpha.d;
 
-	cl_matrix2x2 sweepSide;
-	sweepSide.a = 1.0;
-	sweepSide.b = 0.0;
-	sweepSide.c = 0.0;
-	sweepSide.d = 1.0;
-
-	double sei = justSolveEnergyInt(wt, damperX, u, c, cInverted, cTilde, sweepSide, a, t, l, hx, ht, alpha, beta, tempAlpha);
+	double sei = solveEnergyInt(wt, damperX, u, c, cInverted, cTilde, a, t, l, hx, ht, alpha, beta);
 	
 	energyInt[0] = sei;
 
 	noFault[0] = 1;
 }
+

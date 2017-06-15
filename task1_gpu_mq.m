@@ -52,27 +52,15 @@ cTilde = osc_cTilde(alpha, b);
 u = osc_y(hx);
 v = osc_sec_y();
 
-%  wt = marquardt(@solve_all, damper_x, wt_start, 100, vareps, power(10, 4), hx, ht, y, y_sec, c, c_inverted, sweep_side, cTilde, beta, false);
-
-%  disp(ei);
-%  ei = power(10, -4) - solve_all(wt, hx, ht, y, y_sec, c, c_inverted, sweep_side, cTilde, beta);
-%  wt = marquardt(@solve_all, damper_x, wt_start, 100, vareps, power(10, 4), false);
-
-%print_dampers_info();
 alpha = osc_alpha(hx, ht);
 beta = osc_beta(hx);
-
-	%err = power(10, -4) - solve_all(wt, hx, ht, y, y_sec, c, c_inverted, sweep_side, cTilde, beta);
-	
-%u = oscDeadening(damper_x, wt_start, n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta);
 
 wt = wt_start;
 wt(1) = 7.5;
 wt(2) = -97.5;
 disp(wt);
-%wt = marquardt(@solve_all, damper_x, wt, 1, vareps, power(10, 4), n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta, false);
 grad = zeros(1, 1);
-wt = gpuMarquardt(damper_x, wt, n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta, grad);
+wt = gpuMarquardt(damper_x, wt, n, k, u, 1, 1, 1);
 %disp(wt);
 exit;
 u = oscDeadening(damper_x, wt, n, k, hx, ht, u, v, c, c_inverted, sweep_side, cTilde, beta);
