@@ -19,18 +19,53 @@
 
 cl_platform_id platform_id = NULL;
 cl_device_id device_id = NULL;
-cl_context context = NULL;
 cl_command_queue command_queue = NULL;
 cl_mem memobj = NULL;
-cl_program program = NULL;
-cl_kernel kernel = NULL;
 cl_uint ret_num_devices;
 cl_uint ret_num_platforms;
 cl_int ret;
 
+cl_context context = NULL;
+cl_program program = NULL;
+cl_kernel kernel = NULL;
+
 cl_context gradientContext = NULL;
 cl_program gradientProgram = NULL;
 cl_kernel gradientKernel = NULL;
+
+cl_context hessianContext = NULL;
+cl_program hessianProgram = NULL;
+cl_kernel hessianKernel = NULL;
+
+void createAndBuildHessianKernel() {
+	FILE* fp;
+	const char* filename = "hessian.cl";
+	size_t source_size;
+	char* source_str;
+
+	fp = fopen(filename, "r");
+	if (!fp) {
+		fprintf(stderr, "Fail\n");
+		exit(0);
+	}
+
+	source_str = (char*) malloc(sizeof(char) * 100000);
+	source_size = fread(source_str, 1, 100000, fp);
+	fclose(fp);
+
+	ret = clGetPlatformIDs(1, &platform_id, &ret_num_platforms);
+	ret = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, &ret_num_devices);
+
+	hessianContext = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
+	hessianProgram = clCreateProgramWithSource(hessianContext, 1, (const char**) &source_str, (const size_t*) &source_size, &ret);
+
+	puts("Now building hessian kernel");
+
+	ret = clBuildProgram(hessianProgram, 1, &device_id, NULL, NULL, NULL);
+	hessianKernel = clCreateKernel(hessianProgram, "hessianAt", &ret);
+
+	puts("OpenCL hessian kernel has built");
+}
 
 void createAndBuildGradientKernel() {
 	FILE* fp;
@@ -59,7 +94,7 @@ void createAndBuildGradientKernel() {
 	ret = clBuildProgram(gradientProgram, 1, &device_id, NULL, NULL, NULL);
 	gradientKernel = clCreateKernel(gradientProgram, "gradientAt", &ret);
 
-	puts("OpenCL kernel has built");
+	puts("OpenCL gradient kernel has built");
 }
 
 void createAndBuildKernel() {
@@ -116,6 +151,14 @@ void releaseAll() {
 	clReleaseProgram(program);
 	clReleaseKernel(kernel);
 	clReleaseContext(context);
+
+	clReleaseProgram(gradientProgram);
+	clReleaseKernel(gradientKernel);
+	clReleaseContext(gradientContext);
+
+	clReleaseProgram(hessianProgram);
+	clReleaseKernel(hessianKernel);
+	clReleaseContext(hessianContext);
 }
 
 cl_double solveEnergyInt(cl_double* damperX, cl_double* wt, cl_double* u, int n, int k) {
@@ -211,22 +254,81 @@ double derivativeAt(double* dampx, Matrix wt, double* du, int n, int k, int nth)
 	return (f1 - f0) / derH;
 }
 
-Matrix gpuHessianAt(Matrix gradient, Matrix wt, int k, double derH, double* dampx, double* du, int n) {
-	Matrix h(k + 1, k + 1);
+Matrix gpuHessianAt(Matrix gradient, Matrix wt, int k, double derH, double* dampx, cl_double* u, int n) {
+	size_t block = 1;
+	size_t global_work_size[] = {block, 0, 0};
+	size_t local_work_size[] = {block, 0, 0};
+
+	cl_int* no_fault = (cl_int*) malloc(sizeof(cl_int));
+	no_fault[0] = 0;
+
+	cl_double a = 1.0;
+	cl_double l = 1.0;
+	cl_double t = 1.0;
+
+	int numOfDampers = 1;
+
+	cl_double sei = gradient(0);
+
+	cl_mem cl_gradient = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (k + 1), NULL, NULL);
+	cl_mem cl_hessian = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (k + 1) * (k + 1), NULL, NULL);
+	cl_mem cl_wt = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * (k + 1), NULL, NULL);
+	cl_mem cl_damper_x = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
+	cl_mem cl_u = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
+	cl_mem cl_no_fault = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
+
+	clSetKernelArg(hessianKernel, 0, sizeof(cl_mem), &cl_gradient);
+	clSetKernelArg(hessianKernel, 1, sizeof(cl_mem), &cl_hessian);
+	clSetKernelArg(hessianKernel, 2, sizeof(cl_mem), &cl_wt);
+	clSetKernelArg(hessianKernel, 3, sizeof(cl_mem), &cl_damper_x);
+	clSetKernelArg(hessianKernel, 4, sizeof(cl_mem), &cl_u);
+	clSetKernelArg(hessianKernel, 5, sizeof(cl_double), &a);
+	clSetKernelArg(hessianKernel, 6, sizeof(cl_double), &l);
+	clSetKernelArg(hessianKernel, 7, sizeof(cl_double), &t);
+	clSetKernelArg(hessianKernel, 8, sizeof(cl_mem), &cl_no_fault);
+
+	cl_double* grad = (cl_double*) malloc(sizeof(cl_double) * (k + 1));
+	cl_double* dwt = (cl_double*) malloc(sizeof(cl_double) * (k + 1));
 	for (register int i = 0; i < k + 1; i++) {
-		double d0 = gradient(i);
+		grad[i] = gradient(i);
+		dwt[i] = wt(i);
+	}
+	cl_double* h = (cl_double*) malloc(sizeof(cl_double) * (k + 1) * (k + 1));
+
+	do {
+		cl_command_queue command_queue = clCreateCommandQueue(hessianContext, device_id, 0, &ret);
+
+		clEnqueueWriteBuffer(command_queue, cl_gradient, CL_TRUE, 0, sizeof(cl_double) * (k + 1), grad, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_wt, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dwt, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_damper_x, CL_TRUE, 0, sizeof(cl_double) * numOfDampers, dampx, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_u, CL_TRUE, 0, sizeof(cl_double) * (n + 1), u, 0, NULL, NULL);
+		clEnqueueWriteBuffer(command_queue, cl_no_fault, CL_TRUE, 0, sizeof(cl_int), no_fault, 0, NULL, NULL);
+
+		clEnqueueNDRangeKernel(command_queue, hessianKernel, CL_TRUE, NULL, global_work_size, local_work_size, 0, NULL, NULL);
+
+		clFlush(command_queue);
+		clFinish(command_queue);
+
+		clEnqueueReadBuffer(command_queue, cl_hessian, CL_TRUE, 0, sizeof(cl_double) * (k + 1) * (k + 1), h, 0, NULL, NULL);
+		clEnqueueReadBuffer(command_queue, cl_no_fault, CL_TRUE, 0, sizeof(cl_int), no_fault, 0, NULL, NULL);
+
+		clReleaseCommandQueue(command_queue);
+	} while (no_fault[0] != 1);
+
+	clReleaseMemObject(cl_gradient);
+	clReleaseMemObject(cl_wt);
+	clReleaseMemObject(cl_damper_x);
+	clReleaseMemObject(cl_u);
+	clReleaseMemObject(cl_no_fault);
+
+	Matrix hessian(k + 1, k + 1);
+	for (register int i = 0; i < k + 1; i++) {
 		for (register int j = i; j < k + 1; j++) {
-			Matrix wtNew = wt;
-			wtNew(j) += derH;
-
-			double d1 = derivativeAt(dampx, wtNew, du, n, k, i);
-			double sd = (d1 - d0) / derH;
-
-			h(i, j) = sd;
-			h(j, i) = sd;
+			hessian(i, j) = h[j + i * (k + 1)];
+			hessian(j, i) = h[j + i * (k + 1)];
 		}
 	}
-	return h;
+	return hessian;
 }
 
 double euclideanNorm(Matrix gradient, int k) {
@@ -318,6 +420,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 
 	createAndBuildKernel();
 	createAndBuildGradientKernel();
+	createAndBuildHessianKernel();
 	
 	double* du = toDouble(u, n, k);
 	double dampx[]{damperX(0), damperX(1)};
@@ -417,15 +520,12 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	}
 
 	/*
-
-		output_file = fopen('marquardt_last', 'w');
-		fprintf(output_file, "%.256e\n", mu);
-		for i = 1 : length(wt(:))
-			fprintf(output_file, "%.256e\n", wt_new(i));
-		endfor
-		fclose(output_file);
-	
-		
+	output_file = fopen('marquardt_last', 'w');
+	fprintf(output_file, "%.256e\n", mu);
+	for i = 1 : length(wt(:))
+		fprintf(output_file, "%.256e\n", wt_new(i));
+	endfor
+	fclose(output_file);
 	*/
 
 	releaseAll();
