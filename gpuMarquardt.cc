@@ -40,13 +40,20 @@ cl_kernel hessianKernel = NULL;
 int n, k, numOfDampers;
 cl_double a, l, t;
 
+bool isPenaltyMinimization = false;
+
 void createAndBuildHessianKernel() {
 	FILE* fp;
-	const char* filename = "hessian.cl";
 	size_t source_size;
 	char* source_str;
 
-	fp = fopen(filename, "r");
+	if (isPenaltyMinimization) {
+		const char* filename = "penHessian.cl";
+		fp = fopen(filename, "r");
+	} else {
+		const char* filename = "hessian.cl";
+		fp = fopen(filename, "r");
+	}
 	if (!fp) {
 		fprintf(stderr, "Fail\n");
 		exit(0);
@@ -72,11 +79,16 @@ void createAndBuildHessianKernel() {
 
 void createAndBuildGradientKernel() {
 	FILE* fp;
-	const char* filename = "gradient.cl";
 	size_t source_size;
 	char* source_str;
 
-	fp = fopen(filename, "r");
+	if (isPenaltyMinimization) {
+		const char* filename = "penGradient.cl";
+		fp = fopen(filename, "r");
+	} else {
+		const char* filename = "gradient.cl";
+		fp = fopen(filename, "r");
+	}
 	if (!fp) {
 		fprintf(stderr, "Fail\n");
 		exit(0);
@@ -257,7 +269,7 @@ Matrix toMatrix(double* u, const int n, const int k) {
 	return mu;
 }
 
-Matrix gpuHessianAt(Matrix gradient, Matrix wt, Matrix st, double derH, double* dampx, cl_double* u) {
+Matrix gpuHessianAt(Matrix gradient, Matrix wt, Matrix st, double derH, double* dampx, Matrix wtBounds, cl_double* u) {
 	size_t block = 1;
 	size_t global_work_size[] = {block, 0, 0};
 	size_t local_work_size[] = {block, 0, 0};
@@ -274,17 +286,39 @@ Matrix gpuHessianAt(Matrix gradient, Matrix wt, Matrix st, double derH, double* 
 	cl_mem cl_damper_x = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
 	cl_mem cl_u = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
 	cl_mem cl_no_fault = clCreateBuffer(hessianContext, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
+	cl_mem cl_wt_bounds;
+	cl_double* dbounds;
 
-	clSetKernelArg(hessianKernel, 0, sizeof(cl_mem), &cl_gradient);
-	clSetKernelArg(hessianKernel, 1, sizeof(cl_mem), &cl_hessian);
-	clSetKernelArg(hessianKernel, 2, sizeof(cl_mem), &cl_wt);
-	clSetKernelArg(hessianKernel, 3, sizeof(cl_mem), &cl_st);
-	clSetKernelArg(hessianKernel, 4, sizeof(cl_mem), &cl_damper_x);
-	clSetKernelArg(hessianKernel, 5, sizeof(cl_mem), &cl_u);
-	clSetKernelArg(hessianKernel, 6, sizeof(cl_double), &a);
-	clSetKernelArg(hessianKernel, 7, sizeof(cl_double), &l);
-	clSetKernelArg(hessianKernel, 8, sizeof(cl_double), &t);
-	clSetKernelArg(hessianKernel, 9, sizeof(cl_mem), &cl_no_fault);
+	if (isPenaltyMinimization) {
+		cl_wt_bounds = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * 2, NULL, NULL);
+		dbounds = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * 2);
+		for (register int i = 0; i < numOfDampers; i++) {
+			dbounds[i * 2] = wtBounds(i, 0);
+			dbounds[1 + i * 2] = wtBounds(i, 1);
+		}
+		clSetKernelArg(hessianKernel, 0, sizeof(cl_mem), &cl_gradient);
+		clSetKernelArg(hessianKernel, 1, sizeof(cl_mem), &cl_hessian);
+		clSetKernelArg(hessianKernel, 2, sizeof(cl_mem), &cl_wt);
+		clSetKernelArg(hessianKernel, 3, sizeof(cl_mem), &cl_st);
+		clSetKernelArg(hessianKernel, 4, sizeof(cl_mem), &cl_damper_x);
+		clSetKernelArg(hessianKernel, 5, sizeof(cl_mem), &cl_wt_bounds);
+		clSetKernelArg(hessianKernel, 6, sizeof(cl_mem), &cl_u);
+		clSetKernelArg(hessianKernel, 7, sizeof(cl_double), &a);
+		clSetKernelArg(hessianKernel, 8, sizeof(cl_double), &l);
+		clSetKernelArg(hessianKernel, 9, sizeof(cl_double), &t);
+		clSetKernelArg(hessianKernel, 10, sizeof(cl_mem), &cl_no_fault);
+	} else {
+		clSetKernelArg(hessianKernel, 0, sizeof(cl_mem), &cl_gradient);
+		clSetKernelArg(hessianKernel, 1, sizeof(cl_mem), &cl_hessian);
+		clSetKernelArg(hessianKernel, 2, sizeof(cl_mem), &cl_wt);
+		clSetKernelArg(hessianKernel, 3, sizeof(cl_mem), &cl_st);
+		clSetKernelArg(hessianKernel, 4, sizeof(cl_mem), &cl_damper_x);
+		clSetKernelArg(hessianKernel, 5, sizeof(cl_mem), &cl_u);
+		clSetKernelArg(hessianKernel, 6, sizeof(cl_double), &a);
+		clSetKernelArg(hessianKernel, 7, sizeof(cl_double), &l);
+		clSetKernelArg(hessianKernel, 8, sizeof(cl_double), &t);
+		clSetKernelArg(hessianKernel, 9, sizeof(cl_mem), &cl_no_fault);
+	}
 
 	cl_double* grad = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
 	cl_double* dwt = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
@@ -301,6 +335,9 @@ Matrix gpuHessianAt(Matrix gradient, Matrix wt, Matrix st, double derH, double* 
 	do {
 		cl_command_queue command_queue = clCreateCommandQueue(hessianContext, device_id, 0, &ret);
 
+		if (isPenaltyMinimization) {
+			clEnqueueWriteBuffer(command_queue, cl_wt_bounds, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * 2, dbounds, 0, NULL, NULL);
+		}
 		clEnqueueWriteBuffer(command_queue, cl_gradient, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), grad, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_wt, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dwt, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_st, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dst, 0, NULL, NULL);
@@ -325,6 +362,9 @@ Matrix gpuHessianAt(Matrix gradient, Matrix wt, Matrix st, double derH, double* 
 	clReleaseMemObject(cl_damper_x);
 	clReleaseMemObject(cl_u);
 	clReleaseMemObject(cl_no_fault);
+	if (isPenaltyMinimization) {
+		clReleaseMemObject(cl_wt_bounds);
+	}
 
 	Matrix hessian(numOfDampers * (k + 1), numOfDampers * (k + 1));
 	for (register int i = 0; i < numOfDampers * (k + 1); i++) {
@@ -344,7 +384,7 @@ double euclideanNorm(Matrix gradient, int k) {
 	return sqrt(n);
 }
 
-Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double* dampx, cl_double* u) {
+Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double* dampx, Matrix wtBounds, cl_double* u) {
 	size_t block = 1;
 	size_t global_work_size[] = {block, 0, 0};
 	size_t local_work_size[] = {block, 0, 0};
@@ -358,17 +398,39 @@ Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double
 	cl_mem cl_damper_x = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers, NULL, NULL);
 	cl_mem cl_u = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * (n + 1) * (k + 1), NULL, NULL);
 	cl_mem cl_no_fault = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, NULL);
+	cl_mem cl_wt_bounds;
+	cl_double* dbounds;
 
-	clSetKernelArg(gradientKernel, 0, sizeof(cl_double), &sei);
-	clSetKernelArg(gradientKernel, 1, sizeof(cl_mem), &cl_gradient);
-	clSetKernelArg(gradientKernel, 2, sizeof(cl_mem), &cl_wt);
-	clSetKernelArg(gradientKernel, 3, sizeof(cl_mem), &cl_st);
-	clSetKernelArg(gradientKernel, 4, sizeof(cl_mem), &cl_damper_x);
-	clSetKernelArg(gradientKernel, 5, sizeof(cl_mem), &cl_u);
-	clSetKernelArg(gradientKernel, 6, sizeof(cl_double), &a);
-	clSetKernelArg(gradientKernel, 7, sizeof(cl_double), &l);
-	clSetKernelArg(gradientKernel, 8, sizeof(cl_double), &t);
-	clSetKernelArg(gradientKernel, 9, sizeof(cl_mem), &cl_no_fault);
+	if (isPenaltyMinimization) {
+		cl_wt_bounds = clCreateBuffer(gradientContext, CL_MEM_READ_WRITE, sizeof(cl_double) * numOfDampers * 2, NULL, NULL);
+		dbounds = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * 2);
+		for (register int i = 0; i < numOfDampers; i++) {
+			dbounds[i * 2] = wtBounds(i, 0);
+			dbounds[1 + i * 2] = wtBounds(i, 1);
+		}
+		clSetKernelArg(gradientKernel, 0, sizeof(cl_double), &sei);
+		clSetKernelArg(gradientKernel, 1, sizeof(cl_mem), &cl_gradient);
+		clSetKernelArg(gradientKernel, 2, sizeof(cl_mem), &cl_wt);
+		clSetKernelArg(gradientKernel, 3, sizeof(cl_mem), &cl_st);
+		clSetKernelArg(gradientKernel, 4, sizeof(cl_mem), &cl_damper_x);
+		clSetKernelArg(gradientKernel, 5, sizeof(cl_mem), &cl_wt_bounds);
+		clSetKernelArg(gradientKernel, 6, sizeof(cl_mem), &cl_u);
+		clSetKernelArg(gradientKernel, 7, sizeof(cl_double), &a);
+		clSetKernelArg(gradientKernel, 8, sizeof(cl_double), &l);
+		clSetKernelArg(gradientKernel, 9, sizeof(cl_double), &t);
+		clSetKernelArg(gradientKernel, 10, sizeof(cl_mem), &cl_no_fault);
+	} else {
+		clSetKernelArg(gradientKernel, 0, sizeof(cl_double), &sei);
+		clSetKernelArg(gradientKernel, 1, sizeof(cl_mem), &cl_gradient);
+		clSetKernelArg(gradientKernel, 2, sizeof(cl_mem), &cl_wt);
+		clSetKernelArg(gradientKernel, 3, sizeof(cl_mem), &cl_st);
+		clSetKernelArg(gradientKernel, 4, sizeof(cl_mem), &cl_damper_x);
+		clSetKernelArg(gradientKernel, 5, sizeof(cl_mem), &cl_u);
+		clSetKernelArg(gradientKernel, 6, sizeof(cl_double), &a);
+		clSetKernelArg(gradientKernel, 7, sizeof(cl_double), &l);
+		clSetKernelArg(gradientKernel, 8, sizeof(cl_double), &t);
+		clSetKernelArg(gradientKernel, 9, sizeof(cl_mem), &cl_no_fault);
+	}
 
 	cl_double* grad = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
 	cl_double* dwt = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
@@ -384,6 +446,9 @@ Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double
 		cl_command_queue command_queue = clCreateCommandQueue(gradientContext, device_id, 0, &ret);
 
 		//clEnqueueWriteBuffer(command_queue, cl_gradient, CL_TRUE, 0, sizeof(cl_double) * (k + 1), gradient, 0, NULL, NULL);
+		if (isPenaltyMinimization) {
+			clEnqueueWriteBuffer(command_queue, cl_wt_bounds, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * 2, dbounds, 0, NULL, NULL);
+		}
 		clEnqueueWriteBuffer(command_queue, cl_wt, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dwt, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_st, CL_TRUE, 0, sizeof(cl_double) * numOfDampers * (k + 1), dst, 0, NULL, NULL);
 		clEnqueueWriteBuffer(command_queue, cl_damper_x, CL_TRUE, 0, sizeof(cl_double) * numOfDampers, dampx, 0, NULL, NULL);
@@ -407,6 +472,9 @@ Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double
 	clReleaseMemObject(cl_damper_x);
 	clReleaseMemObject(cl_u);
 	clReleaseMemObject(cl_no_fault);
+	if (isPenaltyMinimization) {
+		clReleaseMemObject(cl_wt_bounds);
+	}
 
 	Matrix gradient(numOfDampers * (k + 1), 1);
 	for (register int i = 0; i < numOfDampers * (k + 1); i++) {
@@ -417,31 +485,39 @@ Matrix gpuGradientAt(cl_double sei, Matrix wt, Matrix st, double derH, cl_double
 
 DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	Matrix damperX = args(0).matrix_value();
-	Matrix wt = args(1).matrix_value();
-	Matrix st = args(2).matrix_value();
+	Matrix wtBounds = args(1).matrix_value();
+	Matrix wt = args(2).matrix_value();
+	Matrix st = args(3).matrix_value();
 
-	numOfDampers = args(3).int_value();
-	n = args(4).int_value();
-	k = args(5).int_value();
-	Matrix u = args(6).matrix_value();
+	numOfDampers = args(4).int_value();
+	n = args(5).int_value();
+	k = args(6).int_value();
+	Matrix u = args(7).matrix_value();
 
-	a = args(7).double_value();
-	l = args(8).double_value();
-	t = args(9).double_value();
+	a = args(8).double_value();
+	l = args(9).double_value();
+	t = args(10).double_value();
 
-	int m = args(10).int_value();
-	double vareps = args(11).double_value();
+	int m = args(11).int_value();
+	double vareps = args(12).double_value();
 
-	createAndBuildKernel();
-	createAndBuildGradientKernel();
-	createAndBuildHessianKernel();
-	
 	cl_double* du = toDouble(u, n, k);
 
 	cl_double* dampx = (cl_double*) malloc(sizeof(cl_double) * numOfDampers);
 	for (register int i = 0; i < numOfDampers; i++) {
 		dampx[i] = damperX(i);
 	}
+
+	for (register int i = 0; i < numOfDampers; i++) {
+		if (!isnan(wtBounds(i, 0)) | !isnan(wtBounds(i, 1))) {
+			isPenaltyMinimization = true;
+			break;
+		}
+	}
+
+	createAndBuildKernel();
+	createAndBuildGradientKernel();
+	createAndBuildHessianKernel();
 
 	cl_double* dwt = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
 	cl_double* dst = (cl_double*) malloc(sizeof(cl_double) * numOfDampers * (k + 1));
@@ -450,6 +526,10 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 			dwt[j + i * (k + 1)] = wt(j, i);
 			dst[j + i * (k + 1)] = st(j, i);
 		}
+	}
+
+	if (isPenaltyMinimization) {
+		printf("\nUsing penalty method minimization\n");
 	}
 
 	printf("\nUsing Marquardt minimization\n\n");
@@ -466,7 +546,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	Matrix gradient;
 	double gradientNorm;
 
-	gradient = gpuGradientAt(fPrev, wt, st, derH, dampx, du);
+	gradient = gpuGradientAt(fPrev, wt, st, derH, dampx, wtBounds, du);
 	printGradient(gradient, iter, m);
 
 	gradientNorm = euclideanNorm(gradient, k);
@@ -478,7 +558,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 		Matrix wtNew(k + 1, numOfDampers);
 		iter += 1;
 
-		Matrix h = gpuHessianAt(gradient, wt, st, derH, dampx, du);
+		Matrix h = gpuHessianAt(gradient, wt, st, derH, dampx, wtBounds, du);
 		printHessianMatrix(h, iter, m);
 	
 		printf("Iteration %d/%d μ: %lf\n", iter, m, mu);
@@ -526,7 +606,7 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 		printf("\n");
 
 		wt = wtNew;
-		gradient = gpuGradientAt(fPrev, wt, st, derH, dampx, du);
+		gradient = gpuGradientAt(fPrev, wt, st, derH, dampx, wtBounds, du);
 		printGradient(gradient, iter, m);
 
 		gradientNorm = euclideanNorm(gradient, k);
