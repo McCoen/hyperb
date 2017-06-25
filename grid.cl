@@ -1,6 +1,6 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
-#define NUMBER_OF_DAMPERS 2
+#define NUMBER_OF_DAMPERS 1
 #define N 80
 #define K 32
 
@@ -49,18 +49,14 @@ cl_matrix2x2 matrixMultiplyByNumber2x2(cl_matrix2x2 a, double d) {
 
 double oscF(double* wt, double* st, double* damperX, double a, double l, double x, const int i) {
 	double f = 0.0;
-
-	for (int m = 0; m < NUMBER_OF_DAMPERS; m++) {
-		double w = wt[i + m * (K + 1)];
-		double s = st[i + m * (K + 1)];
-		double fNew = -x / (a * l) * (l - damperX[m] - s);
-		if (x >= damperX[m] + s) {
-			fNew += (x - damperX[m] - s) / a;
-		}
-
-		f += fNew * w;
+	double w = wt[i];
+	double s = st[i];
+	double fNew = -x / (a * l) * (l - damperX[0] - s);
+	if (x >= damperX[0] + s) {
+		fNew += (x - damperX[0] - s) / a;
 	}
 
+	f += fNew * w;
 	return f;
 }
 
@@ -73,7 +69,8 @@ double solveEnergyInt(__global double* wt, __global double* st, __global double*
 	cl_matrix2x1 temp1, temp2, temp3;
 	cl_matrix2x1 currentV;
 
-	double detDenominator, fA, fB, sA, sB, x, wA, wB, fNewA, fNewB, numInt, dx;
+	double detDenominator, fA, fB, x, wA, wB, fNewA, fNewB, numInt, dx;
+	int gi = 1, gj = 0;
 
 	sweepAlphaArr[0].a = cInverted.a;
 	sweepAlphaArr[0].b = cInverted.b;
@@ -96,20 +93,20 @@ double solveEnergyInt(__global double* wt, __global double* st, __global double*
 	double v[N + 1];
 	double f[N + 1];
 	double dampx[NUMBER_OF_DAMPERS];
-	double dwt[NUMBER_OF_DAMPERS * (K + 1)];
-	double dst[NUMBER_OF_DAMPERS * (K + 1)];
+	double dwt[K + 1];
+	double dst[K + 1];
 
 	for (int i = 0; i < N + 1; i++) {
 		u[i] = pu[i];
 		v[i] = 0.0;
 		f[i] = 0.0;
 	}
+	for (int i = 0; i < K + 1; i++) {
+		dwt[i] = wt[i];
+		dst[i] = st[i];
+	}
 	for (int i = 0; i < NUMBER_OF_DAMPERS; i++) {
 		dampx[i] = damperX[i];
-		for (int j = 0; j < K + 1; j++) {
-			dwt[j + i * (K + 1)] = wt[j + i * (K + 1)];
-			dst[j + i * (K + 1)] = st[j + i * (K + 1)];
-		}
 	}
 
 	for (int i = 1; i <= K; i++) {
@@ -138,6 +135,31 @@ double solveEnergyInt(__global double* wt, __global double* st, __global double*
 			x = hx * j;
 			fA = oscF(dwt, dst, dampx, a, l, x, i - 1);
 			fB = oscF(dwt, dst, dampx, a, l, x, i);
+
+			/*
+			fA = 0.0;
+			fB = 0.0;
+
+			sA = st[i - 1];
+			sB = st[i];
+
+			wA = wt[i - 1];
+			wB = wt[i];
+
+			//double fNew = -x / (a * l) * (l - damperX[0] - s);
+			fNewA = -x / (a * l) * (l - dampx[0] - sA);
+			fNewB = -x / (a * l) * (l - dampx[0] - sB);
+			if (x >= dampx[0] + sA) {
+				//fNew += (x - damperX[0] - s) / a;
+				fNewA += (x - dampx[0] - sA) / a;
+			}
+			if (x >= dampx[0] + sB) {
+				fNewB += (x - dampx[0] - sB) / a;
+			}
+
+			fA += fNewA * wA;
+			fB += fNewB * wB;
+			*/
 
 			currentV.a = -fA - fB;
 			currentV.b = 0.0;
@@ -180,6 +202,9 @@ double solveEnergyInt(__global double* wt, __global double* st, __global double*
 		for (int j = N - 2; j > 0; j--) {
 			u[j] = sweepAlphaArr[j - 1].a * u[j + 1] + sweepAlphaArr[j - 1].b * v[j + 1] + sweepBetaArr[j - 1].a;
 			v[j] = sweepAlphaArr[j - 1].c * u[j + 1] + sweepAlphaArr[j - 1].d * v[j + 1] + sweepBetaArr[j - 1].b;
+		}
+		for (int j = 0; j <= N; j++) {
+			pu[j + i * (N + 1)] = u[j];
 		}
 
 		if (i == K - 2) {
@@ -226,7 +251,7 @@ double solveEnergyInt(__global double* wt, __global double* st, __global double*
 	return numInt;
 }
 
-__kernel void energyInt(__global double* energyInt, __global double* wt, __global double* st, __global double* damperX, __global double* u, double a, double l, double t, __global int* noFault) {
+__kernel void solveGrid(__global double* energyInt, __global double* wt, __global double* st, __global double* damperX, __global double* u, double a, double l, double t, __global int* noFault) {
 
 	double hx = l / N;
 	double ht = t / K;

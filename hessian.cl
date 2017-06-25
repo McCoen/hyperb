@@ -1,8 +1,8 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
-#define NUMBER_OF_DAMPERS 1
-#define N 160
-#define K 64
+#define NUMBER_OF_DAMPERS 2
+#define N 80
+#define K 32
 
 typedef struct alphastruct {
 	double a, b, c, d;
@@ -12,7 +12,24 @@ typedef struct betastruct {
 	double a, b;
 } cl_matrix2x1;
 
-__kernel void hessianAt(__global double* grad, __global double* h, __global double* wt, __global double* damperX, __global double* pu, double a, double l, double t, __global int* noFault) {
+double oscF(double* wt, double* st, double* damperX, double a, double l, double x, const int i) {
+	double f = 0.0;
+
+	for (int m = 0; m < NUMBER_OF_DAMPERS; m++) {
+		double w = wt[i + m * (K + 1)];
+		double s = st[i + m * (K + 1)];
+		double fNew = -x / (a * l) * (l - damperX[m] - s);
+		if (x >= damperX[m] + s) {
+			fNew += (x - damperX[m] - s) / a;
+		}
+
+		f += fNew * w;
+	}
+
+	return f;
+}
+
+__kernel void hessianAt(__global double* grad, __global double* h, __global double* wt, __global double* st, __global double* damperX, __global double* pu, double a, double l, double t, __global int* noFault) {
 	double derH = 0.0001;
 	double hx = l / N;
 	double ht = t / K;
@@ -82,26 +99,32 @@ __kernel void hessianAt(__global double* grad, __global double* h, __global doub
 	double v[N + 1];
 	double f[N + 1];
 	double bu[N + 1];
-	double bwt[K + 1];
-	double pgrad[K + 1];
+	double bwt[NUMBER_OF_DAMPERS * (K + 1)];
+	double dst[NUMBER_OF_DAMPERS * (K + 1)];
+	double pgrad[NUMBER_OF_DAMPERS * (K + 1)];
+	double dampx[NUMBER_OF_DAMPERS];
 
 	for (int i = 0; i < N + 1; i++) {
 		bu[i] = pu[i];
-	}
-	for (int i = 0; i < K + 1; i++) {
-		bwt[i] = wt[i];
-		pgrad[i] = grad[i];
 	}
 	for (int i = 0; i < N + 1; i++) {
 		u[i] = bu[i];
 		v[i] = 0.0;
 	}
+	for (int i = 0; i < NUMBER_OF_DAMPERS; i++) {
+		dampx[i] = damperX[i];
+		for (int j = 0; j < K + 1; j++) {
+			bwt[j + i * (K + 1)] = wt[j + i * (K + 1)];
+			dst[j + i * (K + 1)] = st[j + i * (K + 1)];
+			pgrad[j + i * (K + 1)] = grad[j + i * (K + 1)];
+		}
+	}
 
-	double htemp[K + 1];
+	double htemp[NUMBER_OF_DAMPERS * (K + 1)];
 
-	for (int nth = 0; nth <= K; nth++) {
+	for (int nth = 0; nth < NUMBER_OF_DAMPERS * (K + 1); nth++) {
 		d0 = pgrad[nth];
-		for (int j = 0; j <= K; j++) {
+		for (int j = 0; j < NUMBER_OF_DAMPERS * (K + 1); j++) {
 			if (j >= nth) {
 				bwt[j] += derH;
 				for (int i = 1; i <= K; i++) {
@@ -138,20 +161,25 @@ __kernel void hessianAt(__global double* grad, __global double* h, __global doub
 						temp2.a += y2.a;
 						temp2.b += y2.b;
 
+						x = hx * j;
+						fA = oscF(bwt, dst, dampx, a, l, x, i - 1);
+						fB = oscF(bwt, dst, dampx, a, l, x, i);
+
+						/*
 						fA = 0.0;
 						fB = 0.0;
-						x = hx * j;
 
 						wA = bwt[i - 1];
 						wB = bwt[i];
 
-						fNew = -x * (1.0 - 0.5);
-						if (x >= 0.5) {
-							fNew += 1.0 * (x - 0.5);
+						fNew = -x * (1.0 - dampx[0]);
+						if (x >= dampx[0]) {
+							fNew += 1.0 * (x - dampx[0]);
 						}
 
 						fA += fNew * wA;
 						fB += fNew * wB;
+						*/
 
 						currentV.a = -fA - fB;
 						currentV.b = 0.0;
@@ -273,20 +301,25 @@ __kernel void hessianAt(__global double* grad, __global double* h, __global doub
 						temp2.a += y2.a;
 						temp2.b += y2.b;
 
+						x = hx * j;
+						fA = oscF(bwt, dst, dampx, a, l, x, i - 1);
+						fB = oscF(bwt, dst, dampx, a, l, x, i);
+
+						/*
 						fA = 0.0;
 						fB = 0.0;
-						x = hx * j;
 
 						wA = bwt[i - 1];
 						wB = bwt[i];
 
-						fNew = -x * (1.0 - 0.5);
-						if (x >= 0.5) {
-							fNew += 1.0 * (x - 0.5);
+						fNew = -x * (1.0 - dampx[0]);
+						if (x >= dampx[0]) {
+							fNew += 1.0 * (x - dampx[0]);
 						}
 
 						fA += fNew * wA;
 						fB += fNew * wB;
+						*/
 
 						currentV.a = -fA - fB;
 						currentV.b = 0.0;
@@ -378,10 +411,9 @@ __kernel void hessianAt(__global double* grad, __global double* h, __global doub
 				bwt[j] -= derH;
 			}
 		}
-		for (int j = 0; j <= K; j++) {
+		for (int j = 0; j < NUMBER_OF_DAMPERS * (K + 1); j++) {
 			if (j >= nth) {
 				h[j + (K + 1) * nth] = htemp[j];
-				//h[nth + (K + 1) * j] = htemp[j];
 			}
 		}
 	}
