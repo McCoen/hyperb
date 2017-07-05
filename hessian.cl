@@ -1,9 +1,5 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
-#define NUMBER_OF_DAMPERS 2
-#define N 80
-#define K 32
-
 typedef struct alphastruct {
 	double a, b, c, d;
 } cl_matrix2x2;

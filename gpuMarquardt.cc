@@ -71,7 +71,9 @@ void createAndBuildHessianKernel() {
 
 	puts("Now building hessian kernel");
 
-	ret = clBuildProgram(hessianProgram, 1, &device_id, NULL, NULL, NULL);
+	char gridSize[1024];
+	sprintf(gridSize, "-DN=%d -DK=%d -DNUMBER_OF_DAMPERS=%d", n, k, numOfDampers);
+	ret = clBuildProgram(hessianProgram, 1, &device_id, gridSize, NULL, NULL);
 	hessianKernel = clCreateKernel(hessianProgram, "hessianAt", &ret);
 
 	puts("OpenCL hessian kernel has built");
@@ -106,7 +108,9 @@ void createAndBuildGradientKernel() {
 
 	puts("Now building gradient kernel");
 
-	ret = clBuildProgram(gradientProgram, 1, &device_id, NULL, NULL, NULL);
+	char gridSize[1024];
+	sprintf(gridSize, "-DN=%d -DK=%d -DNUMBER_OF_DAMPERS=%d", n, k, numOfDampers);
+	ret = clBuildProgram(gradientProgram, 1, &device_id, gridSize, NULL, NULL);
 	gradientKernel = clCreateKernel(gradientProgram, "gradientAt", &ret);
 
 	puts("OpenCL gradient kernel has built");
@@ -136,7 +140,9 @@ void createAndBuildKernel() {
 
 	puts("Now building kernel");
 
-	ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+	char gridSize[1024];
+	sprintf(gridSize, "-DN=%d -DK=%d -DNUMBER_OF_DAMPERS=%d", n, k, numOfDampers);
+	ret = clBuildProgram(program, 1, &device_id, gridSize, NULL, NULL);
 	kernel = clCreateKernel(program, "energyInt", &ret);
 
 	puts("OpenCL kernel has built");
@@ -553,7 +559,8 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 	printf("Iteration %d/%d gradient norm: %e\n", iter, m, gradientNorm);
 	printf("\n");
 
-	double mu = pow(10, 4);
+	//double mu = pow(10, 4);
+	double mu = 1.0;
 	while (gradientNorm > vareps && iter < m) {
 		Matrix wtNew(k + 1, numOfDampers);
 		iter += 1;
@@ -613,15 +620,6 @@ DEFUN_DLD(gpuMarquardt, args, nargout, "") {
 		printf("Iteration %d/%d gradient norm: %e\n", iter, m, gradientNorm);
 		printf("\n");
 	}
-
-	/*
-	output_file = fopen('marquardt_last', 'w');
-	fprintf(output_file, "%.256e\n", mu);
-	for i = 1 : length(wt(:))
-		fprintf(output_file, "%.256e\n", wt_new(i));
-	endfor
-	fclose(output_file);
-	*/
 
 	releaseAll();
 	return octave_value(wt);

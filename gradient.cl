@@ -1,9 +1,5 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
-#define NUMBER_OF_DAMPERS 1
-#define N 160
-#define K 64
-
 typedef struct alphastruct {
 	double a, b, c, d;
 } cl_matrix2x2;
@@ -12,8 +8,24 @@ typedef struct betastruct {
 	double a, b;
 } cl_matrix2x1;
 
-__kernel void gradientAt(double energyInt, __global double* grad, __global double* wt, __global double* damperX, __global double* pu, double a, double l, double t, __global int* noFault) {
+double oscF(double* wt, double* st, double* damperX, double a, double l, double x, const int i) {
+	double f = 0.0;
 
+	for (int m = 0; m < NUMBER_OF_DAMPERS; m++) {
+		double w = wt[i + m * (K + 1)];
+		double s = st[i + m * (K + 1)];
+		double fNew = -x / (a * l) * (l - damperX[m] - s);
+		if (x >= damperX[m] + s) {
+			fNew += (x - damperX[m] - s) / a;
+		}
+
+		f += fNew * w;
+	}
+
+	return f;
+}
+
+__kernel void gradientAt(double energyInt, __global double* grad, __global double* wt, __global double* st, __global double* damperX, __global double* pu, double a, double l, double t, __global int* noFault) {
 	double derH = 0.0001;
 	double hx = l / N;
 	double ht = t / K;
@@ -83,20 +95,26 @@ __kernel void gradientAt(double energyInt, __global double* grad, __global doubl
 	double v[N + 1];
 	double f[N + 1];
 	double bu[N + 1];
-	double bwt[K + 1];
+	double bwt[NUMBER_OF_DAMPERS * (K + 1)];
+	double dst[NUMBER_OF_DAMPERS * (K + 1)];
+	double dampx[NUMBER_OF_DAMPERS];
 
 	for (int i = 0; i < N + 1; i++) {
 		bu[i] = pu[i];
-	}
-	for (int i = 0; i < K + 1; i++) {
-		bwt[i] = wt[i];
 	}
 	for (int i = 0; i < N + 1; i++) {
 		u[i] = bu[i];
 		v[i] = 0.0;
 	}
+	for (int i = 0; i < NUMBER_OF_DAMPERS; i++) {
+		dampx[i] = damperX[i];
+		for (int j = 0; j < K + 1; j++) {
+			bwt[j + i * (K + 1)] = wt[j + i * (K + 1)];
+			dst[j + i * (K + 1)] = st[j + i * (K + 1)];
+		}
+	}
 
-	for (int nth = 0; nth <= K; nth++) {
+	for (int nth = 0; nth < NUMBER_OF_DAMPERS * (K + 1); nth++) {
 		bwt[nth] += derH;
 		for (int i = 1; i <= K; i++) {
 			for (int j = 1; j < N; j++) {
@@ -132,20 +150,9 @@ __kernel void gradientAt(double energyInt, __global double* grad, __global doubl
 				temp2.a += y2.a;
 				temp2.b += y2.b;
 
-				fA = 0.0;
-				fB = 0.0;
 				x = hx * j;
-
-				wA = bwt[i - 1];
-				wB = bwt[i];
-
-				fNew = -x * (1.0 - 0.5);
-				if (x >= 0.5) {
-					fNew += 1.0 * (x - 0.5);
-				}
-
-				fA += fNew * wA;
-				fB += fNew * wB;
+				fA = oscF(bwt, dst, dampx, a, l, x, i - 1);
+				fB = oscF(bwt, dst, dampx, a, l, x, i);
 
 				currentV.a = -fA - fB;
 				currentV.b = 0.0;
@@ -233,9 +240,6 @@ __kernel void gradientAt(double energyInt, __global double* grad, __global doubl
 		grad[nth] = (numInt - energyInt) / derH;
 		bwt[nth] -= derH;
 	}
-
-
-
 
 	noFault[0] = 1;
 }
